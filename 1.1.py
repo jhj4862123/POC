@@ -10,6 +10,7 @@ import probs as probs
 import seaborn as sns
 import tensorflow as tf
 from sklearn.utils import class_weight
+from tensorflow.python.keras.backend import dropout
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
@@ -40,16 +41,17 @@ os.mkdir(result_path)
 
 # sys.stdout = open(result_path + 'console.txt', 'w')
 
-photo_path = '/data/workspace/POCdata/photo/ENG'  # 진짜
-#photo_path = '/data/workspace/POCdata/photo/filtered'  # 정제한거
+#photo_path = '/data/workspace/POCdata/photo/ENG'  # 진짜
 # photo_path = '/data/workspace/POCdata/photo/1/ENG' #학명만
 # photo_path = '/data/workspace/POCdata/photo/Legacy/test' #테스트
+#photo_path = '/data/workspace/POCdata/photo/poc'  # poc
+photo_path = '/data/workspace/POCdata/photo/inat2021'  #inat
 
 photo_dir = os.listdir(photo_path)
 
 '''########## 로그 파일 생성 ##########'''
 
-dev = [4, 5, 6, 7]
+dev = [4, 5, 6]
 gh.set_gpu(dev)
 
 strategy = tf.distribute.MirroredStrategy()
@@ -76,18 +78,20 @@ with strategy.scope():
                     data.append([resized_arr, class_num])
                 except Exception as e:
                     print(e)
-        #np.save('data.npy', data)
+        np.save('pocdata.npy', data)
         return np.array(data, dtype="object")
 
 
-    data = get_data('/data/workspace/POCdata/photo/ENG') # 진짜
-    #data = get_data('/data/workspace/POCdata/photo/filtered')  # 정제한거
+
+    #data = get_data('/data/workspace/POCdata/photo/ENG') # 진짜
     # data = get_data('/data/workspace/POCdata/photo/1/ENG')  # 학명만
     # data = get_data('/data/workspace/POCdata/photo/Legacy/test')  # 테스트
+    #data = get_data('/data/workspace/POCdata/photo/poc')  # poc
+    data = get_data('/data/workspace/POCdata/photo/inat2021')  # 정제한거
 
     print("다 넣음")
     # data = data.shuffle(buffer_size=len(data)) # 시간 잡아먹어서 끔
-    #data = np.load('106data.npy', allow_pickle=True)
+    #data = np.load('pocdata.npy', allow_pickle=True)
 
     '''#################################################################### 총 입력 이미지 수 시각화 #####################################################################'''
 
@@ -104,7 +108,8 @@ with strategy.scope():
     plt.savefig(result_path + 'totalamount.png')
     print("TotalImage 출력...")
 
-    '''#################################################################### 증강 #####################################################################'''
+    '''#################################################################### 배열에 이미지 넣기 #####################################################################'''
+
     x = []
     y = []
 
@@ -112,6 +117,8 @@ with strategy.scope():
     for feature, label in tqdm(data):
         x.append(feature)
         y.append(label)
+    '''#################################################################### 증강 #####################################################################'''
+
     '''#################################################################### 그레이스케일 정규화 및 리쉐이핑 #####################################################################'''
 
     x = np.array(x) / 255  # 데이터 노멀라이징
@@ -122,8 +129,6 @@ with strategy.scope():
     y = label_binarizer.fit_transform(y)
 
     x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, stratify=y, random_state=0)
-    smote = SMOTE(random_state=101)
-    x_train, y_train = smote.fit_resample(x_train, y_train)
 
     '''#################################################################### ROC커브 #####################################################################'''
 
@@ -151,23 +156,23 @@ with strategy.scope():
 
     for layer in pre_trained_model.layers[:19]:
         layer.trainable = False
-
-        model = Sequential([
-            pre_trained_model,
-            MaxPool2D((2, 2), strides=2),
-            # Dropout(0.2),
-            Flatten(),
-            Dense(106, activation='softmax')])
-        model.compile(optimizer="adam", loss='categorical_crossentropy', metrics=['accuracy'])
+    num_classes = 30
+    model = Sequential([
+        pre_trained_model,
+        MaxPool2D((2, 2), strides=2),
+        Flatten(),
+        Dense(num_classes, activation=tf.nn.softmax)])
+    model.compile(optimizer="adam", loss='categorical_crossentropy', metrics=['accuracy'])
     model.summary()
     print("Model Summary 완료")
     '''#################################################################### 에포크 #####################################################################'''
 
-    learning_rate_reduction = ReduceLROnPlateau(monitor='val_accuracy', patience=2, verbose=1, factor=0.3,
-                                                min_lr=0.000001)  # 콜백함수
-
+    # learning_rate_reduction = ReduceLROnPlateau(monitor='val_accuracy', patience=2, verbose=1, factor=0.3,
+    #                                             min_lr=0.000001)  # 콜백함수
+    learning_rate_reduction = ReduceLROnPlateau(monitor='val_accuracy', patience=1, verbose=1, mode='auto')
     history = model.fit(x_train, y_train, batch_size=64, epochs=5, validation_data=(x_test, y_test),
                         callbacks=[learning_rate_reduction])
+    #model.save("1.1softmodel.h5")
 
     print("테스트에 사용할 이미지 수 :", len(y_test))
 
@@ -266,16 +271,16 @@ with strategy.scope():
 
     '''#################################################################### 테스트 #####################################################################
     # 데이터 증강 및 드롭아웃 레이어는 추론 시 비활성화됨.
-
-
+    
+    
     test_path = '/data/workspace/POCdata/photo/test/'
-    x = input()
-    example = test_path + x + '.jpg'
+    x = input("이름 입력 : ")
+    example = test_path + x
     testimg = tf.keras.preprocessing.image.load_img(example, target_size=(img_size, img_size))
-
+    
     img_array = tf.keras.preprocessing.image.img_to_array(testimg)
     img_array = tf.expand_dims(img_array, 0)  # Create a batch
-
+    
     testpredictions = model.predict(img_array)
     print(testpredictions)
     score = tf.nn.softmax(testpredictions[0])
@@ -283,12 +288,12 @@ with strategy.scope():
     print("이 이미지는 {}(으)로 예측되고, 확률은 약 {:.2f}% 입니다.".format(labels[np.argmax(score)], 100 * np.max(score)))'''
 
     '''#################################################################### 루프 #####################################################################
-
+    
     while True:
         testimg()
         if input("다시 테스트하시겠습니까? (y/n)") == "n":
             break
-
+    
     '''
 
     # xgb_basic = XGBClassifier()
